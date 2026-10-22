@@ -1,3 +1,5 @@
+> **This project's home is now [github.com/globe-teck/agent-inbox-watcher](https://github.com/globe-teck/agent-inbox-watcher).** This copy stays up for existing links. Please open issues and pull requests there.
+
 # agent-inbox-watcher
 
 A tiny, dependency-free way for a team of AI agents (or scripts) to report to a
