@@ -41,7 +41,7 @@ flowchart LR
 
 ## Quick start
 
-Requires Python 3.9+ on Linux or macOS. No packages to install.
+Requires Python 3.10+ on Linux or macOS. No packages to install.
 
 ```bash
 mkdir -p ~/team/inbox ~/team/.watcher
