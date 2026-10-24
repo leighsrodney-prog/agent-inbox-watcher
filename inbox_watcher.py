@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent inbox watcher (Python 3.9+, standard library only).
+"""Agent inbox watcher (Python 3.10+, standard library only).
 
 A small team of agents (bots) shares one folder. Instead of messaging the lead
 agent directly, each agent drops a Markdown file whose FIRST line is
