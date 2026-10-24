@@ -25,6 +25,9 @@ Configuration (environment variables):
   WAKE_AUTH           exact Authorization header value, e.g. "Bearer <token>"
                       If either is missing the watcher runs in DRY-RUN mode:
                       it logs what it would POST and announces nothing.
+  AIW_REQUIRE_LIVE    1 = refuse to start in DRY-RUN (exit 4) and make
+                      --status exit 4 if the running watcher is in DRY-RUN.
+                      Use it in production so lost credentials fail loudly.
   AIW_INBOX           folder to watch          (default ./inbox)
   AIW_STATE_DIR       state, log, pid, acks    (default ./state)
   AIW_TZ              IANA time zone           (default UTC)
@@ -44,7 +47,9 @@ ok is true only on HTTP 2xx, so a sender can confirm its own file was delivered.
 
 Usage: inbox_watcher.py            # loop forever
        inbox_watcher.py --once     # single pass
-       inbox_watcher.py --status   # running yes/no, pid, announced/pending; exit 3 if not running
+       inbox_watcher.py --status   # running yes/no, pid, mode, announced/pending
+                                   # exit 3 if not running, 4 if dry-run under AIW_REQUIRE_LIVE
+       inbox_watcher.py --require-live  # same as AIW_REQUIRE_LIVE=1
 """
 import argparse
 import datetime as dt
@@ -88,6 +93,9 @@ STATE_DIR = os.path.abspath(os.environ.get("AIW_STATE_DIR") or "state")
 STATE_PATH = os.path.join(STATE_DIR, "watcher_state.json")
 LOG_PATH = os.path.join(STATE_DIR, "watcher.log")
 PID_PATH = os.path.join(STATE_DIR, "watcher.pid")
+MODE_PATH = os.path.join(STATE_DIR, "watcher.mode")   # LIVE or DRY-RUN of the running process
+REQUIRE_LIVE = (os.environ.get("AIW_REQUIRE_LIVE") or "").strip().lower() in ("1", "true", "yes", "on")
+EXIT_NOT_LIVE = 4
 ALLOW_INSECURE_HTTP = False  # set by --allow-insecure-http
 ACK_PATH = os.path.join(STATE_DIR, "acks.jsonl")
 
@@ -427,9 +435,26 @@ def release_lock():
         _lock_fd = None
 
 
+def write_mode(mode):
+    """Record the running process's mode so --status (another shell) can report it."""
+    tmp = MODE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(mode + "\n")
+    os.replace(tmp, MODE_PATH)
+
+
+def read_mode():
+    try:
+        with open(MODE_PATH) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def status():
     pid = read_pid()
     running = pid_alive(pid)
+    run_mode = read_mode() if running else None
     s = load_state()
     items = scan_inbox(time.time() + SETTLE_SECONDS)
     ann = set(s["announced"]) & set(items)
@@ -437,13 +462,26 @@ def status():
     by = {k: sum(1 for u in pend.values() if u == k) for k in ("risk", "decision", "fyi")}
     print(f"running: {'yes' if running else 'no'}")
     print(f"pid: {pid if running else '-'}")
-    print(f"mode: {'LIVE' if creds() else 'DRY-RUN (WAKE_URL/WAKE_AUTH not set in this shell)'}")
+    if running and run_mode:
+        print(f"mode: {run_mode} (running watcher)")
+    elif running:
+        print("mode: unknown (running watcher has no watcher.mode; restart it to record its mode)")
+    else:
+        print(f"mode: {'LIVE' if creds() else 'DRY-RUN (WAKE_URL/WAKE_AUTH not set in this shell)'}")
     print(f"inbox: {INBOX}")
     print(f"announced: {len(ann)}")
     print(f"pending: {len(pend)} (risk {by['risk']}, decision {by['decision']}, fyi {by['fyi']})")
     lf = s.get("last_fyi_post")
     print("last fyi POST: " + (dt.datetime.fromtimestamp(float(lf), TZ).strftime("%Y-%m-%d %H:%M %Z") if lf else "never"))
-    return 0 if running else 3
+    if not running:
+        return 3
+    if REQUIRE_LIVE and run_mode is None:
+        print("ALERT: AIW_REQUIRE_LIVE is set but the running watcher's mode is unknown; restart it")
+        return EXIT_NOT_LIVE
+    if REQUIRE_LIVE and run_mode != "LIVE":
+        print("ALERT: watcher is running in DRY-RUN but AIW_REQUIRE_LIVE is set; nothing is being delivered")
+        return EXIT_NOT_LIVE
+    return 0
 
 
 def main():
@@ -451,16 +489,25 @@ def main():
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--once", action="store_true", help="single pass, then exit")
     g.add_argument("--status", action="store_true", help="print status and exit (exit code 3 if not running)")
+    ap.add_argument("--require-live", action="store_true",
+                    help="refuse to start without WAKE_URL/WAKE_AUTH (exit 4); same as AIW_REQUIRE_LIVE=1")
     ap.add_argument("--allow-insecure-http", action="store_true",
                     help="permit a plain http:// WAKE_URL (auth header is sent unencrypted)")
     a = ap.parse_args()
-    global ALLOW_INSECURE_HTTP
+    global ALLOW_INSECURE_HTTP, REQUIRE_LIVE
     ALLOW_INSECURE_HTTP = a.allow_insecure_http
+    REQUIRE_LIVE = REQUIRE_LIVE or a.require_live
     if a.status:
         return status()
     os.makedirs(STATE_DIR, exist_ok=True)
     os.makedirs(INBOX, exist_ok=True)
     setup_logging()
+    if REQUIRE_LIVE and creds() is None:
+        msg = ("refusing to start: AIW_REQUIRE_LIVE is set but WAKE_URL/WAKE_AUTH are missing "
+               "(the watcher would run in DRY-RUN and deliver nothing)")
+        print(msg, file=sys.stderr)
+        log.error(msg)
+        return EXIT_NOT_LIVE
     if not acquire_lock():
         msg = f"another inbox_watcher is running (pid {read_pid()}); exiting"
         print(msg, file=sys.stderr)
@@ -472,7 +519,11 @@ def main():
         stop["flag"] = True
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-    log.info("start pid=%d mode=%s once=%s", os.getpid(), "LIVE" if creds() else "DRY-RUN", a.once)
+    mode = "LIVE" if creds() else "DRY-RUN"
+    write_mode(mode)
+    log.info("start pid=%d mode=%s once=%s", os.getpid(), mode, a.once)
+    if mode == "DRY-RUN":
+        log.warning("running in DRY-RUN: no wakes will be delivered until WAKE_URL/WAKE_AUTH are set and the watcher restarts")
     try:
         while True:
             try:

@@ -51,7 +51,7 @@ export WAKE_URL="https://example.invalid/hooks/lead-agent"   # your webhook (htt
 export WAKE_AUTH="Bearer <your-webhook-token>"               # exact Authorization header value
 
 ./ensure_watcher.sh          # starts it in the background if it isn't running
-python3 inbox_watcher.py --status   # exits 0 if running, 3 if not
+python3 inbox_watcher.py --status   # exits 0 if running, 3 if not (4: see "Failing loudly" below)
 ```
 
 Drop a test file:
@@ -102,6 +102,36 @@ private file outside the repository (see `examples/env.example`).
 | `AIW_DECISION_WAIT`  | `3`       | Seconds to wait so close-together decisions share one wake |
 | `AIW_DECISION_MAX`   | `6`       | Longest a decision is held while another is still being written |
 | `AIW_SETTLE_SECONDS` | `2`       | Skip files modified this recently (still being written) |
+| `AIW_REQUIRE_LIVE`   | (off)     | `1` (or `true`/`yes`/`on`) = never run in dry-run: refuse to start without credentials and make `--status` exit 4 (same as `--require-live`) |
+
+## Failing loudly when credentials go missing
+
+Dry-run is handy while you try the watcher out, but in production it is a
+trap: if the environment that holds `WAKE_URL` and `WAKE_AUTH` is lost (a
+restored backup, a rebuilt box, a new shell that skipped your profile) and the
+watcher restarts, it keeps scanning and logging and simply never wakes anyone.
+
+Set `AIW_REQUIRE_LIVE=1` (or pass `--require-live` to `inbox_watcher.py` or
+`ensure_watcher.sh`) wherever the watcher is
+meant to deliver:
+
+- The watcher refuses to start without credentials and exits with code 4.
+- `ensure_watcher.sh` refuses to launch it and exits 4, so a cron job or
+  heartbeat that calls it shows a failure instead of a healthy-looking start.
+- The running watcher records its mode in `<state>/watcher.mode`, and
+  `--status` reports that mode rather than the mode of the shell you run it
+  from. Under `AIW_REQUIRE_LIVE`, `--status` exits 4 with an `ALERT` line when a
+  running watcher is in dry-run. A watcher started before this version has
+  no recorded mode, so restart it once after upgrading.
+
+| `--status` exit code | Meaning                                         |
+| -------------------- | ----------------------------------------------- |
+| `0`                  | Running (and live, when `AIW_REQUIRE_LIVE` is set) |
+| `3`                  | Not running                                     |
+| `4`                  | Running in dry-run while `AIW_REQUIRE_LIVE` is set |
+
+Hook the exit code into whatever already alerts you; the watcher never prints
+the URL or the auth value.
 
 ## What the webhook receives
 
